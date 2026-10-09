@@ -76,6 +76,10 @@ textarea.input{resize:vertical}
 .login-box h1{font-family:var(--serif);font-size:1.7rem;margin-bottom:4px}
 .login-box form{display:grid;gap:12px;margin-top:22px;text-align:left}
 .login-err{color:var(--danger);font-size:.88rem;min-height:1.2em;text-align:center}
+.lf{display:grid;gap:5px;font-size:.8rem;color:var(--muted)}
+.l-alt{margin-top:6px;width:100%;font-weight:500;color:var(--ink)}
+.l-pie{margin-top:16px;font-size:.74rem;color:var(--muted);line-height:1.45}.l-pie a{color:inherit}
+#l-sub b{color:var(--brand)}
 
 /* Layout */
 #app{display:flex;min-height:100vh}
@@ -326,7 +330,7 @@ a.btn{text-decoration:none}
   <div class="login-box">
     <div class="logo"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg></div>
     <h1 id="l-salon">Salón de Belleza</h1>
-    <p class="muted sm">Sistema de gestión · Ingresa con tu usuario</p>
+    <p class="muted sm" id="l-sub">Sistema de gestión · Ingresa con tu usuario</p>
     <div class="demo-box" id="l-demo-box" hidden><b>🧪 Modo prueba</b> · datos ficticios guardados solo en este navegador; nada se envía a Google Sheets. Toca un usuario para entrar:
       <div class="demo-users"><button type="button" data-u="admin" data-p="admin123">Administrador</button><button type="button" data-u="recepcion" data-p="recep123">Recepción</button><button type="button" data-u="lucia" data-p="lucia123">Estilista</button></div></div>
     <form id="f-login" autocomplete="on">
@@ -335,7 +339,17 @@ a.btn{text-decoration:none}
       <button class="btn pri big" type="submit">Ingresar</button>
       <div class="login-err" id="l-err"></div>
     </form>
+    <form id="f-reg" hidden autocomplete="on">
+      <label class="lf">Nombre de tu salón<input class="input" id="r-salon" maxlength="60" required></label>
+      <label class="lf">Tu nombre<input class="input" id="r-nombre" autocomplete="name" maxlength="60" required></label>
+      <label class="lf">Tu WhatsApp<input class="input" id="r-wa" type="tel" inputmode="tel" autocomplete="tel" placeholder="9876-5432" required></label>
+      <label class="lf">Crea un PIN de 4 a 6 números<input class="input" id="r-pin" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" required></label>
+      <button class="btn pri big" type="submit">Comenzar prueba gratis</button>
+      <div class="login-err" id="r-err"></div>
+    </form>
+    <button class="btn ghost l-alt" id="l-alt" type="button" hidden></button>
     <div class="row-btns" style="justify-content:center;margin-top:8px"><button class="btn ghost sm" id="l-demo" type="button">Probar en modo prueba</button><button class="btn ghost sm" id="l-server" type="button">Configurar servidor</button></div>
+    <p class="l-pie" id="l-pie" hidden>Software creado por José Vicdonio Molina · WhatsApp <a href="https://wa.me/50433130265" target="_blank" rel="noopener">+504 3313-0265</a></p>
   </div>
 </div>
 
@@ -404,8 +418,21 @@ a.btn{text-decoration:none}
  * Para activar un cliente: ejecuta activarLicencia()
  * Para darle más días: ejecuta extenderPrueba() (agrega 7 días)
  */
-const DIAS_PRUEBA = 0;
+const DIAS_PRUEBA = 7;
 const CONTACTO_WA = '50433130265'; // WhatsApp para activar el sistema (con código de país)
+
+/* ---------------- MODO MULTI-SALÓN ----------------
+ * MULTI_SALON = true → un solo enlace para muchos salones. Cada salón se registra
+ * con el nombre, su WhatsApp y un PIN; se le crea su propia hoja de datos en tu Drive
+ * y aparece en la hoja «Licencias», donde lo activas, extiendes o bloqueas.
+ */
+const MULTI_SALON = true;
+const CARPETA_DATOS = 'Salones – Datos';
+const SCHEMA_M = {
+  Licencias: ['id','salon','duena','whatsapp','registro','vencePrueba','estado','usuarios','ultimaConexion','hojaId'],
+  Accesos:   ['whatsapp','salonId','usuarioId','activo']
+};
+let SALON = null; // salón de la solicitud actual (modo multi)
 
 const TZ = 'America/Tegucigalpa';
 const SESION_SEG = 21600; // 6 horas (máximo permitido por CacheService)
@@ -472,10 +499,15 @@ function json_(o) {
 }
 
 function route_(req) {
+  Object.keys(MEMO).forEach(k => { delete MEMO[k]; });
+  SALON = null;
   const a = req.action, d = req.data || {};
-  const lic = licencia_();
-  if (lic.estado === 'vencida') throw new Error('PRUEBA_VENCIDA|' + JSON.stringify({ contacto: CONTACTO_WA, nombre: config_().nombre }));
-  if (a === 'login') return login_(d);
+  if (!MULTI_SALON) {
+    const lic = licencia_();
+    if (lic.estado === 'vencida') throw new Error('PRUEBA_VENCIDA|' + JSON.stringify({ contacto: CONTACTO_WA, nombre: config_().nombre }));
+  }
+  if (a === 'login') return MULTI_SALON ? loginMulti_(d) : login_(d);
+  if (a === 'registrar') return registrar_(d);
   const u = auth_(req.token);
   switch (a) {
     case 'logout':          CacheService.getScriptCache().remove('S_' + req.token); return true;
@@ -514,7 +546,14 @@ function lock_(fn) {
 
 const MEMO = {};
 
-function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
+function ss_() {
+  if (MULTI_SALON && SALON) {
+    if (!MEMO._ss) MEMO._ss = SpreadsheetApp.openById(SALON.hojaId);
+    return MEMO._ss;
+  }
+  return SpreadsheetApp.getActiveSpreadsheet();
+}
+function ck_(name) { return 'H_' + (SALON ? SALON.id + '_' : '') + name; }
 
 function sh_(name) {
   const ss = ss_();
@@ -550,13 +589,13 @@ function rows_(name) {
   if (!MEMO[name]) {
     const cacheable = CACHE_HOJAS.indexOf(name) >= 0;
     let data = null;
-    if (cacheable) { try { const c = CacheService.getScriptCache().get('H_' + name); if (c) data = JSON.parse(c); } catch (e) { data = null; } }
+    if (cacheable) { try { const c = CacheService.getScriptCache().get(ck_(name)); if (c) data = JSON.parse(c); } catch (e) { data = null; } }
     if (!data) {
       const s = sh_(name), n = s.getLastRow(), h = SCHEMA[name];
       data = n < 2 ? [] : s.getRange(2, 1, n - 1, h.length).getValues()
         .filter(r => r[0] !== '' && r[0] !== null)
         .map(r => obj_(h, r));
-      if (cacheable) { try { const j = JSON.stringify(data); if (j.length < 95000) CacheService.getScriptCache().put('H_' + name, j, CACHE_SEG); } catch (e) {} }
+      if (cacheable) { try { const j = JSON.stringify(data); if (j.length < 95000) CacheService.getScriptCache().put(ck_(name), j, CACHE_SEG); } catch (e) {} }
     }
     MEMO[name] = data;
   }
@@ -565,7 +604,7 @@ function rows_(name) {
 
 function invalidar_(name) {
   delete MEMO[name];
-  try { CacheService.getScriptCache().remove('H_' + name); } catch (e) {}
+  try { CacheService.getScriptCache().remove(ck_(name)); } catch (e) {}
 }
 
 function cell_(v) { return (v === undefined || v === null) ? '' : v; }
@@ -653,17 +692,24 @@ function login_(d) {
 function auth_(token) {
   if (!token) throw new Error('SESION');
   const c = CacheService.getScriptCache();
-  const uid = c.get('S_' + token);
-  if (!uid) throw new Error('SESION');
+  const val = c.get('S_' + token);
+  if (!val) throw new Error('SESION');
+  let uid = val;
+  if (MULTI_SALON) {
+    const p = val.split('|'), lic = salonPorId_(p[0]);
+    if (!lic) throw new Error('SESION');
+    setSalon_(lic); uid = p[1];
+    bloquearSiVence_();
+  }
   const u = rows_('Usuarios').find(x => x.id === uid);
   if (!u || !u.activo) throw new Error('SESION');
-  c.put('S_' + token, uid, SESION_SEG); // sesión deslizante
+  c.put('S_' + token, val, SESION_SEG); // sesión deslizante
   return u;
 }
 
 function cambiarClave_(u, d) {
-  if (hash_(String(d.actual || ''), u.salt) !== u.hash) throw new Error('La contraseña actual no es correcta');
-  if (String(d.nueva || '').length < 6) throw new Error('La nueva contraseña debe tener al menos 6 caracteres');
+  if (hash_(String(d.actual || ''), u.salt) !== u.hash) throw new Error(MULTI_SALON ? 'El PIN actual no es correcto' : 'La contraseña actual no es correcta');
+  if (MULTI_SALON ? !/^\d{4,6}$/.test(String(d.nueva || '')) : String(d.nueva || '').length < 6) throw new Error(MULTI_SALON ? 'El PIN debe tener de 4 a 6 números' : 'La nueva contraseña debe tener al menos 6 caracteres');
   const salt = Utilities.getUuid();
   upsert_('Usuarios', { id: u.id, salt: salt, hash: hash_(d.nueva, salt) });
   return true;
@@ -673,22 +719,34 @@ function guardarUsuario_(u, d) {
   req_(u, ['admin']);
   const r = Object.assign({}, d.registro || {});
   const todos = rows_('Usuarios');
-  r.usuario = String(r.usuario || '').trim().toLowerCase();
-  if (!r.usuario || !r.nombre) throw new Error('Usuario y nombre son obligatorios');
+  r.usuario = MULTI_SALON ? waNorm_(r.usuario) : String(r.usuario || '').trim().toLowerCase();
+  if (!r.usuario || !r.nombre) throw new Error(MULTI_SALON ? 'Nombre y WhatsApp son obligatorios' : 'Usuario y nombre son obligatorios');
+  if (MULTI_SALON) {
+    if (r.usuario.length < 10) throw new Error('Escribe un número de WhatsApp válido');
+    if (mRows_('Accesos').some(x => String(x.whatsapp) === r.usuario && !(x.salonId === SALON.id && x.usuarioId === r.id))) throw new Error('Ese WhatsApp ya está registrado en otra cuenta');
+  }
   if (/\s/.test(r.usuario)) throw new Error('El usuario no debe tener espacios');
   if (todos.some(x => x.usuario === r.usuario && x.id !== r.id)) throw new Error('Ese nombre de usuario ya existe');
   if (ROLES.indexOf(r.rol) < 0) throw new Error('Rol no válido');
   if (r.id === u.id && (r.rol !== 'admin' || r.activo === false)) throw new Error('No puedes quitarte el rol de administrador ni desactivarte');
   delete r.hash; delete r.salt;
   if (d.clave) {
-    if (String(d.clave).length < 6) throw new Error('La contraseña debe tener al menos 6 caracteres');
+    if (MULTI_SALON && !/^\d{4,6}$/.test(String(d.clave))) throw new Error('El PIN debe tener de 4 a 6 números');
+    if (!MULTI_SALON && String(d.clave).length < 6) throw new Error('La contraseña debe tener al menos 6 caracteres');
     r.salt = Utilities.getUuid();
     r.hash = hash_(d.clave, r.salt);
   } else if (!r.id) {
-    throw new Error('Asigna una contraseña al nuevo usuario');
+    throw new Error(MULTI_SALON ? 'Asigna un PIN al nuevo integrante' : 'Asigna una contraseña al nuevo usuario');
   }
   if (!r.id) r.creado = ahora_();
-  return publico_(upsert_('Usuarios', r));
+  const g = upsert_('Usuarios', r);
+  if (MULTI_SALON) {
+    const acc = mRows_('Accesos').find(x => x.salonId === SALON.id && x.usuarioId === g.id);
+    if (acc) mSet_('Accesos', acc._fila, { whatsapp: g.usuario, activo: g.activo });
+    else mAppend_('Accesos', { whatsapp: g.usuario, salonId: SALON.id, usuarioId: g.id, activo: g.activo });
+    if (SALON.lic._fila) mSet_('Licencias', SALON.lic._fila, { usuarios: rows_('Usuarios').filter(x => x.activo).length });
+  }
+  return publico_(g);
 }
 
 /* ===================== DATOS GENERALES ===================== */
@@ -722,6 +780,7 @@ function bootstrap_(u, d) {
     gastoCats: ['admin','recepcion'].indexOf(u.rol) >= 0 ? catalogoGastos_() : [],
     licencia: licencia_()
   };
+  if (MULTI_SALON && SALON && SALON.lic._fila) { try { mSet_('Licencias', SALON.lic._fila, { ultimaConexion: ahora_().replace('T', ' ') }); } catch (e) {} }
   if (d && d.inicio) r.inicio = inicio_(u);
   return r;
 }
@@ -742,6 +801,7 @@ function inicio_(u) {
 /* ===================== LICENCIA ===================== */
 
 function licencia_() {
+  if (MULTI_SALON) return SALON ? licSalon_(SALON.lic) : { estado: 'completa' };
   if (!DIAS_PRUEBA) return { estado: 'completa' };
   const pr = PropertiesService.getScriptProperties();
   if (pr.getProperty('LICENCIA') === 'activa') return { estado: 'completa' };
@@ -752,6 +812,160 @@ function licencia_() {
   const resta = Math.ceil((vence - Date.now()) / 86400000);
   return { estado: resta > 0 ? 'prueba' : 'vencida', diasRestantes: Math.max(0, resta),
     vence: Utilities.formatDate(new Date(vence), TZ, 'yyyy-MM-dd'), contacto: CONTACTO_WA };
+}
+
+/* ===================== MULTI-SALÓN: LICENCIAS Y ACCESOS ===================== */
+
+function master_() { return SpreadsheetApp.getActiveSpreadsheet(); }
+
+function masterSheet_(name) {
+  const m = master_();
+  let s = m.getSheetByName(name);
+  if (!s) {
+    s = m.insertSheet(name);
+    const h = SCHEMA_M[name];
+    s.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#8e3b63').setFontColor('#ffffff');
+    s.setFrozenRows(1);
+    h.forEach((k, i) => { if (['whatsapp','id','salonId','usuarioId','hojaId','registro','ultimaConexion'].indexOf(k) >= 0) s.getRange(2, i + 1, s.getMaxRows() - 1, 1).setNumberFormat('@'); });
+    if (name === 'Accesos') { try { s.hideSheet(); } catch (e) {} }
+    if (name === 'Licencias') {
+      try {
+        const regla = SpreadsheetApp.newDataValidation().requireValueInList(['Prueba', 'Activa', 'Vencida', 'Bloqueada'], true).build();
+        s.getRange(2, h.indexOf('estado') + 1, s.getMaxRows() - 1, 1).setDataValidation(regla);
+        s.getRange(2, h.indexOf('vencePrueba') + 1, s.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
+      } catch (e) {}
+    }
+  }
+  return s;
+}
+
+function mRows_(name) {
+  const key = '_m_' + name;
+  if (!MEMO[key]) {
+    const s = masterSheet_(name), n = s.getLastRow(), h = SCHEMA_M[name];
+    MEMO[key] = n < 2 ? [] : s.getRange(2, 1, n - 1, h.length).getValues().map((r, i) => {
+      const o = { _fila: i + 2 };
+      h.forEach((k, j) => {
+        let v = r[j];
+        if (v instanceof Date) v = Utilities.formatDate(v, TZ, k === 'vencePrueba' ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm');
+        o[k] = (v === null || v === undefined) ? '' : (k === 'activo' ? !(v === false || v === 'false' || v === 'FALSE') : String(v));
+      });
+      return o;
+    }).filter(o => o[h[0]] !== '');
+  }
+  return MEMO[key];
+}
+
+function mSet_(name, fila, campos) {
+  const s = masterSheet_(name), h = SCHEMA_M[name];
+  Object.keys(campos).forEach(k => { const c = h.indexOf(k); if (c >= 0) s.getRange(fila, c + 1).setValue(campos[k]); });
+  delete MEMO['_m_' + name];
+}
+
+function mAppend_(name, o) {
+  masterSheet_(name).appendRow(SCHEMA_M[name].map(k => (o[k] === undefined || o[k] === null) ? '' : o[k]));
+  delete MEMO['_m_' + name];
+}
+
+// Normaliza el WhatsApp: solo números y con código de Honduras si vienen 8 dígitos
+function waNorm_(w) {
+  let d = String(w || '').replace(/\D/g, '');
+  if (d.length === 8) d = '504' + d;
+  return d;
+}
+
+function salonPorId_(id) {
+  const c = CacheService.getScriptCache();
+  try { const x = c.get('L_' + id); if (x) return JSON.parse(x); } catch (e) {}
+  const l = mRows_('Licencias').find(x => x.id === id) || null;
+  if (l) { try { c.put('L_' + id, JSON.stringify(l), 120); } catch (e) {} }
+  return l;
+}
+
+function setSalon_(lic) {
+  if (!SALON || SALON.id !== lic.id) delete MEMO._ss;
+  SALON = { id: lic.id, hojaId: lic.hojaId, lic: lic };
+}
+
+function licSalon_(l) {
+  const est = String(l.estado || '').trim().toLowerCase();
+  if (est === 'activa') return { estado: 'completa' };
+  if (est === 'bloqueada') return { estado: 'bloqueada', contacto: CONTACTO_WA };
+  const vence = String(l.vencePrueba || '').slice(0, 10);
+  const fin = /^\d{4}-\d{2}-\d{2}$/.test(vence) ? new Date(vence + 'T00:00:00').getTime() : 0;
+  const resta = Math.ceil((fin - Date.now()) / 86400000);
+  const r = { estado: resta > 0 ? 'prueba' : 'vencida', diasRestantes: Math.max(0, resta), vence: vence, contacto: CONTACTO_WA };
+  const debe = r.estado === 'prueba' ? 'Prueba' : 'Vencida';
+  if (l.estado !== debe && l._fila) {
+    try { mSet_('Licencias', l._fila, { estado: debe }); CacheService.getScriptCache().remove('L_' + l.id); } catch (e) {}
+    l.estado = debe;
+  }
+  return r;
+}
+
+function bloquearSiVence_() {
+  const lic = licencia_();
+  if (lic.estado === 'vencida' || lic.estado === 'bloqueada') {
+    throw new Error('PRUEBA_VENCIDA|' + JSON.stringify({ contacto: CONTACTO_WA, nombre: SALON ? SALON.lic.salon : '', tipo: lic.estado }));
+  }
+}
+
+function nuevoToken_(valor) {
+  const token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  CacheService.getScriptCache().put('S_' + token, valor, SESION_SEG);
+  return token;
+}
+
+function loginMulti_(d) {
+  const c = CacheService.getScriptCache(), wa = waNorm_(d.whatsapp), kf = 'F_' + wa;
+  const fallos = Number(c.get(kf) || 0);
+  if (fallos >= 5) throw new Error('Demasiados intentos fallidos. Espera 10 minutos.');
+  const falla = () => { c.put(kf, String(fallos + 1), 600); return new Error('WhatsApp o PIN incorrectos'); };
+  const acc = mRows_('Accesos').find(x => String(x.whatsapp) === wa && x.activo);
+  if (!acc) throw falla();
+  const lic = salonPorId_(acc.salonId);
+  if (!lic) throw falla();
+  setSalon_(lic);
+  const u = rows_('Usuarios').find(x => x.id === acc.usuarioId);
+  if (!u || !u.activo || hash_(String(d.pin || ''), u.salt) !== u.hash) throw falla();
+  c.remove(kf);
+  bloquearSiVence_();
+  return { token: nuevoToken_(lic.id + '|' + u.id), usuario: publico_(u) };
+}
+
+function carpeta_() {
+  const it = DriveApp.getFoldersByName(CARPETA_DATOS);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(CARPETA_DATOS);
+}
+
+function registrar_(d) {
+  if (!MULTI_SALON) throw new Error('Acción no válida');
+  const salon = String(d.salon || '').trim().replace(/\s+/g, ' '), nombre = String(d.nombre || '').trim().replace(/\s+/g, ' ');
+  const wa = waNorm_(d.whatsapp), pin = String(d.pin || '');
+  if (!salon) throw new Error('Escribe el nombre de tu salón');
+  if (!nombre) throw new Error('Escribe tu nombre');
+  if (wa.length < 10) throw new Error('Escribe tu número de WhatsApp');
+  if (!/^\d{4,6}$/.test(pin)) throw new Error('El PIN debe tener de 4 a 6 números');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    if (mRows_('Accesos').some(x => String(x.whatsapp) === wa)) throw new Error('Ese WhatsApp ya tiene una cuenta. Toca «Ya tengo cuenta» para ingresar.');
+    const libro = SpreadsheetApp.create('Salón – ' + salon);
+    try { DriveApp.getFileById(libro.getId()).moveTo(carpeta_()); } catch (e) {}
+    const id = 'L' + Date.now().toString(36).toUpperCase() + Math.floor(Math.random() * 1296).toString(36).toUpperCase();
+    const ahora = ahora_().replace('T', ' ');
+    const lic = { id: id, salon: salon, duena: nombre, whatsapp: wa, registro: ahora,
+      vencePrueba: Utilities.formatDate(new Date(Date.now() + DIAS_PRUEBA * 86400000), TZ, 'yyyy-MM-dd'),
+      estado: 'Prueba', usuarios: 1, ultimaConexion: ahora, hojaId: libro.getId() };
+    mAppend_('Licencias', lic);
+    SALON = { id: id, hojaId: libro.getId(), lic: lic };
+    MEMO._ss = libro;
+    instalarSalon_({ nombre: salon, telefono: wa.length === 11 && wa.indexOf('504') === 0 ? wa.slice(3, 7) + '-' + wa.slice(7) : wa,
+      admin: { usuario: wa, nombre: nombre, pin: pin } });
+    const adm = rows_('Usuarios').find(x => x.usuario === wa);
+    mAppend_('Accesos', { whatsapp: wa, salonId: id, usuarioId: adm.id, activo: true });
+    return { token: nuevoToken_(id + '|' + adm.id), usuario: publico_(adm) };
+  } finally { lock.releaseLock(); }
 }
 
 // Ejecútala desde el editor de Apps Script cuando el cliente pague
@@ -1264,8 +1478,20 @@ function historialCliente_(u, d) {
 /* ===================== INSTALACIÓN ===================== */
 
 function instalar() {
-  const ss = ss_();
+  if (MULTI_SALON) {
+    // En modo multi-salón solo se preparan las hojas de control; cada salón se crea al registrarse
+    masterSheet_('Licencias'); masterSheet_('Accesos');
+    try { carpeta_(); } catch (e) {}
+    Logger.log('Listo. Publica la App web; cada salón se registra solo desde el enlace.');
+    return;
+  }
   licencia_(); // en la versión de prueba, aquí empieza a contar
+  instalarSalon_({});
+  Logger.log('Instalación lista. Usuario: admin · Contraseña: admin123');
+}
+
+function instalarSalon_(op) {
+  const ss = ss_();
   ss.setSpreadsheetTimeZone(TZ);
   Object.keys(SCHEMA).forEach(n => {
     // Crea las hojas que falten y actualiza encabezados si la versión nueva agregó columnas
@@ -1273,11 +1499,11 @@ function instalar() {
     const actual = sh.getRange(1, 1, 1, h.length).getValues()[0];
     if (h.some((k, i) => actual[i] !== k)) sh.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#8e3b63').setFontColor('#ffffff');
   });
-  if (rows_('Config').length === 0) guardarConfig_({});
+  if (rows_('Config').length === 0) guardarConfig_(op.nombre ? { nombre: op.nombre, telefono: op.telefono || '' } : {});
   if (rows_('Usuarios').length === 0) {
-    const salt = Utilities.getUuid();
-    upsert_('Usuarios', { usuario: 'admin', nombre: 'Administrador', rol: 'admin', color: '#8e3b63',
-      salt: salt, hash: hash_('admin123', salt), activo: true, creado: ahora_() });
+    const salt = Utilities.getUuid(), a = op.admin || { usuario: 'admin', nombre: 'Administrador', pin: 'admin123' };
+    upsert_('Usuarios', { usuario: a.usuario, nombre: a.nombre, rol: 'admin', color: '#8e3b63',
+      salt: salt, hash: hash_(a.pin, salt), activo: true, creado: ahora_() });
   }
   if (rows_('Servicios').length === 0) {
     appendRows_('Servicios', [
@@ -1306,7 +1532,6 @@ function instalar() {
     const s = ss.getSheetByName(n);
     if (s && s.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s);
   });
-  Logger.log('Instalación lista. Usuario: admin · Contraseña: admin123');
 }
 
 </script>
@@ -1317,7 +1542,10 @@ function instalar() {
    CONFIGURACIÓN: pega aquí la URL /exec de tu App web
    (también se puede configurar desde la pantalla de ingreso)
    ========================================================== */
-const API_URL_DEFAULT = 'https://script.google.com/macros/s/AKfycbz2DyyGC_y0iQA-087PQpj9v0wM41G2OmU6-Y4PjOE5VniY1QApw8UZ1uKNlSU_jwzj/exec';
+const API_URL_DEFAULT = '';
+// true = cada salón se registra solo (nombre, WhatsApp y PIN) y entra con WhatsApp + PIN
+const MODO_CUENTAS = true;
+const DIAS_PRUEBA_REG = 7;
 
 /* ===================== ESTADO Y UTILIDADES ===================== */
 // Cada instalación (carpeta/repositorio) guarda sus datos por separado en el navegador
@@ -1488,13 +1716,33 @@ async function ingresar(ev) {
   ev.preventDefault();
   $('#l-err').textContent = '';
   try {
-    const r = await api('login', { usuario: $('#l-user').value.trim(), clave: $('#l-pass').value });
-    S.token = r.token; LS.set(tokenKey(), r.token);
+    const r = await api('login', MODO_CUENTAS ? { whatsapp: $('#l-user').value, pin: $('#l-pass').value.trim() } : { usuario: $('#l-user').value.trim(), clave: $('#l-pass').value });
+    S.token = r.token; LS.set(tokenKey(), r.token); LS.set('salon_cuenta', '1');
     $('#l-pass').value = '';
     await arrancar();
   } catch (e) { errLogin(e.message); }
 }
-function errLogin(m) { const el = $('#l-err'); if (el) el.textContent = m; }
+function errLogin(m) { const el = $(S.lmodo === 'reg' ? '#r-err' : '#l-err'); if (el) el.textContent = m; }
+async function registrarse(ev) {
+  ev.preventDefault();
+  $('#r-err').textContent = '';
+  try {
+    const pin = $('#r-pin').value.trim();
+    if (!/^\d{4,6}$/.test(pin)) throw new Error('El PIN debe tener de 4 a 6 números');
+    if ($('#r-wa').value.replace(/\D/g, '').length < 8) throw new Error('Escribe tu número de WhatsApp');
+    const r = await api('registrar', { salon: $('#r-salon').value.trim(), nombre: $('#r-nombre').value.trim(), whatsapp: $('#r-wa').value, pin });
+    S.token = r.token; LS.set(tokenKey(), r.token); LS.set('salon_cuenta', '1');
+    $('#r-pin').value = '';
+    await arrancar();
+    toast('¡Bienvenida! Tu prueba de ' + DIAS_PRUEBA_REG + ' días ya comenzó', 'ok');
+  } catch (e) { $('#r-err').textContent = e.message; }
+}
+// Muestra un WhatsApp guardado como +504 9876-5432
+function fmtWA(w) {
+  const d = String(w || '').replace(/\D/g, '');
+  if (d.length === 11 && d.indexOf('504') === 0) return '+504 ' + d.slice(3, 7) + '-' + d.slice(7);
+  return d ? '+' + d : '';
+}
 const cacheKey = () => 'salon_cache_' + (DEMO.on ? 'demo' : 'real');
 // Muestra el sistema al instante con los datos de la última visita y los actualiza en segundo plano
 async function arrancar() {
@@ -1525,11 +1773,12 @@ function mostrarVencida(info) {
   S.token = ''; S.user = null; LS.del(tokenKey()); LS.del(cacheKey());
   try { cerrarModal(); } catch (e) {}
   $('#app').hidden = true; $('#login').hidden = false;
-  const tel = String(info.contacto || '').replace(/\D/g, ''), nombre = info.nombre || 'tu salón';
-  $('.login-box').innerHTML = `<div class="logo">${ico('lock')}</div><h1>Tu prueba de 7 días terminó</h1>
-    <p class="muted" style="margin:10px 0 18px;line-height:1.5">Gracias por probar el sistema en <b>${esc(nombre)}</b>. Tu información está guardada y segura: al activarlo, todo sigue tal como lo dejaste.</p>
-    ${tel ? `<a class="btn wa big" href="https://wa.me/${tel}?text=${encodeURIComponent('Hola, quiero activar el sistema de ' + nombre)}" target="_blank" rel="noopener">Activar por WhatsApp</a><p class="muted sm" style="margin-top:14px">Escríbenos y lo activamos el mismo día.</p>`
-      : '<p class="muted sm">Comunícate con quien te instaló el sistema para activarlo.</p>'}`;
+  const tel = String(info.contacto || '').replace(/\D/g, ''), nombre = info.nombre || 'tu salón', bloq = info.tipo === 'bloqueada';
+  $('.login-box').innerHTML = `<div class="logo">${ico('lock')}</div><h1>${bloq ? 'Tu cuenta está suspendida' : 'Tu prueba de ' + DIAS_PRUEBA_REG + ' días terminó'}</h1>
+    <p class="muted" style="margin:10px 0 18px;line-height:1.5">${bloq ? `El acceso a <b>${esc(nombre)}</b> está pausado. Tu información sigue guardada y segura.` : `Gracias por probar el sistema en <b>${esc(nombre)}</b>. Tu información está guardada y segura: al activarlo, todo sigue tal como lo dejaste.`}</p>
+    ${tel ? `<a class="btn wa big" href="https://wa.me/${tel}?text=${encodeURIComponent((bloq ? 'Hola, quiero reactivar el sistema de ' : 'Hola, quiero activar el sistema de ') + nombre)}" target="_blank" rel="noopener">${bloq ? 'Reactivar por WhatsApp' : 'Activar por WhatsApp'}</a><p class="muted sm" style="margin-top:14px">Escríbenos y lo activamos el mismo día.</p>`
+      : '<p class="muted sm">Comunícate con quien te instaló el sistema para activarlo.</p>'}
+    ${MODO_CUENTAS ? '<button class="btn ghost l-alt" type="button" onclick="location.reload()">Ingresar con otra cuenta</button><p class="l-pie">Software creado por José Vicdonio Molina · WhatsApp <a href="https://wa.me/50433130265" target="_blank" rel="noopener">+504 3313-0265</a></p>' : ''}`;
 }
 function aplicarDatos(d) {
   ['config', 'usuarios', 'clientes', 'servicios', 'tratamientos', 'productos', 'planes', 'gastoCats'].forEach(k => { if (d[k]) S[k] = d[k]; });
@@ -1546,6 +1795,7 @@ function salir(expirada) {
   if (S.cal) { S.cal.destroy(); S.cal = null; }
   cerrarModal();
   $('#app').hidden = true; $('#login').hidden = false;
+  if (MODO_CUENTAS && $('#f-reg')) { S.lmodo = 'ing'; pintarLogin(); }
 }
 function configServidor() {
   const actual = apiUrl();
@@ -2416,26 +2666,30 @@ async function cargarReporte() {
 /* ===================== USUARIOS ===================== */
 function vUsuarios() {
   const el = $('#v-usuarios');
-  el.innerHTML = `<div class="toolbar"><p class="muted sm grow" style="margin:0">Cada persona del salón entra con su propio usuario. Los <b>estilistas</b> solo ven su agenda y sus ventas; <b>recepción</b> maneja citas, clientes y caja; el <b>administrador</b> controla todo.</p>
-    <button class="btn pri" id="u-new">${ico('plus')} Nuevo usuario</button></div>
+  el.innerHTML = `<div class="toolbar"><p class="muted sm grow" style="margin:0">Cada persona del salón entra con ${MODO_CUENTAS ? 'su WhatsApp y su PIN' : 'su propio usuario'}. Los <b>estilistas</b> solo ven su agenda y sus ventas; <b>recepción</b> maneja citas, clientes y caja; el <b>administrador</b> controla todo.</p>
+    <button class="btn pri" id="u-new">${ico('plus')} ${MODO_CUENTAS ? 'Nuevo integrante' : 'Nuevo usuario'}</button></div>
     <div class="ucards">${S.usuarios.slice().sort((a, b) => a.nombre.localeCompare(b.nombre)).map(u => `<div class="ucard ${u.activo ? '' : 'off'}" data-id="${esc(u.id)}"><div class="avatar" style="--c:${esc(u.color || '#8e3b63')}">${esc(iniciales(u.nombre))}</div>
-      <div style="flex:1;min-width:0"><b>${esc(u.nombre)}</b><div class="muted sm">@${esc(u.usuario)} · ${ROLES[u.rol] || u.rol}${u.activo ? '' : ' · inactivo'}</div></div></div>`).join('')}</div>`;
+      <div style="flex:1;min-width:0"><b>${esc(u.nombre)}</b><div class="muted sm">${MODO_CUENTAS ? esc(fmtWA(u.usuario)) : '@' + esc(u.usuario)} · ${ROLES[u.rol] || u.rol}${u.activo ? '' : ' · inactivo'}</div></div></div>`).join('')}</div>`;
   $('#u-new').onclick = () => editarUsuario(null);
   $$('.ucard', el).forEach(c => c.onclick = () => editarUsuario(byId(S.usuarios, c.dataset.id)));
 }
 function editarUsuario(u) {
   const nuevo = !u; u = u || { rol: 'estilista', color: '#c9798f', activo: true };
-  modal(nuevo ? 'Nuevo usuario' : 'Editar usuario', `<form class="form" onsubmit="return false">
+  const MC = MODO_CUENTAS;
+  modal(MC ? (nuevo ? 'Nuevo integrante del equipo' : 'Editar integrante') : (nuevo ? 'Nuevo usuario' : 'Editar usuario'), `<form class="form" onsubmit="return false">
     <label class="f full">Nombre completo *<input class="input" id="u-nombre" value="${esc(u.nombre || '')}"></label>
-    <label class="f">Usuario (para ingresar) *<input class="input" id="u-user" value="${esc(u.usuario || '')}" autocapitalize="none"></label>
+    ${MC ? `<label class="f">WhatsApp (para ingresar) *<input class="input" id="u-user" type="tel" inputmode="tel" value="${esc(fmtWA(u.usuario).replace(/^\+504 /, ''))}" placeholder="9876-5432"></label>`
+      : `<label class="f">Usuario (para ingresar) *<input class="input" id="u-user" value="${esc(u.usuario || '')}" autocapitalize="none"></label>`}
     <label class="f">Rol<select class="input" id="u-rol">${Object.keys(ROLES).map(r => `<option value="${r}" ${r === u.rol ? 'selected' : ''}>${ROLES[r]}</option>`).join('')}</select></label>
     <label class="f">Color en agenda<input class="input" type="color" id="u-color" value="${esc(u.color || '#c9798f')}" style="height:42px;padding:4px"></label>
-    <label class="f">${nuevo ? 'Contraseña *' : 'Nueva contraseña'}<input class="input" type="password" id="u-clave" autocomplete="new-password" placeholder="${nuevo ? 'Mínimo 6 caracteres' : 'Dejar vacío para no cambiar'}"></label>
-    <label class="f chk full"><input type="checkbox" id="u-activo" ${u.activo ? 'checked' : ''}> Usuario activo (puede ingresar)</label></form>`, [
+    ${MC ? `<label class="f">${nuevo ? 'PIN inicial *' : 'Nuevo PIN'}<input class="input" type="password" id="u-clave" inputmode="numeric" maxlength="6" autocomplete="new-password" placeholder="${nuevo ? '4 a 6 números' : 'Dejar vacío para no cambiar'}"></label>`
+      : `<label class="f">${nuevo ? 'Contraseña *' : 'Nueva contraseña'}<input class="input" type="password" id="u-clave" autocomplete="new-password" placeholder="${nuevo ? 'Mínimo 6 caracteres' : 'Dejar vacío para no cambiar'}"></label>`}
+    <label class="f chk full"><input type="checkbox" id="u-activo" ${u.activo ? 'checked' : ''}> ${MC ? 'Activo (puede ingresar)' : 'Usuario activo (puede ingresar)'}</label>
+    ${MC ? '<p class="muted sm full" style="margin:0">Entra con su WhatsApp y este PIN. Puede cambiar el PIN en Ajustes.</p>' : ''}</form>`, [
     { t: 'Guardar', cls: 'pri', fn: async () => {
       const g = await api('guardarUsuario', { registro: { id: u.id, nombre: $('#u-nombre').value.trim(), usuario: $('#u-user').value.trim(), rol: $('#u-rol').value, color: $('#u-color').value, activo: $('#u-activo').checked }, clave: $('#u-clave').value });
       upsertLocal('usuarios', g); if (g.id === S.user.id) { S.user = Object.assign(S.user, g); pintarNav(); }
-      cerrarModal(); toast('Usuario guardado', 'ok'); vUsuarios();
+      cerrarModal(); toast(MC ? 'Integrante guardado' : 'Usuario guardado', 'ok'); vUsuarios();
     } }
   ]);
 }
@@ -2443,6 +2697,7 @@ function editarUsuario(u) {
 /* ===================== AJUSTES ===================== */
 function vAjustes() {
   const el = $('#v-ajustes'), c = S.config;
+  const verSrv = (DEMO.on || puede('admin')) && !(MODO_CUENTAS && !DEMO.on);
   const CF = [
     { k: 'nombre', l: 'Nombre del salón', req: 1, full: 1 }, { k: 'telefono', l: 'Teléfono' }, { k: 'rtn', l: 'RTN' },
     { k: 'direccion', l: 'Dirección', full: 1 }, { k: 'moneda', l: 'Símbolo de moneda' },
@@ -2458,13 +2713,15 @@ function vAjustes() {
       <div style="margin-top:14px"><button class="btn pri" id="cf-save">Guardar ajustes</button></div></section>` : ''}
     <div class="stack">${puede('admin') ? `<section class="card"><h3>Colores del sistema</h3><p class="muted sm" style="margin:-4px 0 12px">Se aplican a todo el equipo y a las imágenes que reciben tus clientes.</p>
       <div class="temas">${TEMAS.map(t => `<button type="button" class="tema ${t.id === S.tema ? 'on' : ''}" data-tema="${t.id}" style="--t1:${t.img[0]};--t2:${t.img[1]};--t3:${t.img[2]};--ta:${t.oro}"><span class="sw"><i></i></span>${t.n}</button>`).join('')}</div></section>` : ''}
-    <section class="card"><h3>Mi contraseña</h3><form class="form" onsubmit="return false">
-      <label class="f full">Contraseña actual<input class="input" type="password" id="pw-a" autocomplete="current-password"></label>
-      <label class="f">Nueva<input class="input" type="password" id="pw-n" autocomplete="new-password"></label>
-      <label class="f">Repetir<input class="input" type="password" id="pw-r" autocomplete="new-password"></label></form>
-      <div style="margin-top:14px"><button class="btn" id="pw-save">Cambiar contraseña</button></div></section>
-    ${DEMO.on || puede('admin') ? '' : '<!--'}<section class="card"><h3>${DEMO.on ? 'Modo prueba' : 'Servidor'}</h3><p class="muted sm" style="word-break:break-all">${DEMO.on ? 'Estás usando datos ficticios guardados solo en este navegador. Nada se envía a Google Sheets.' : esc(apiUrl() || 'No configurado')}</p>
-      <div class="row-btns"><button class="btn" id="srv">${DEMO.on ? 'Opciones del modo prueba' : 'Cambiar servidor'}</button><button class="btn" id="sync">${ico('refresh')} Recargar datos</button></div></section>${DEMO.on || puede('admin') ? '' : '-->'}</div></div>`;
+    <section class="card"><h3>${MODO_CUENTAS ? 'Mi PIN' : 'Mi contraseña'}</h3><form class="form" onsubmit="return false">${(() => { const pa = MODO_CUENTAS ? ' inputmode="numeric" maxlength="6"' : ''; return `
+      <label class="f full">${MODO_CUENTAS ? 'PIN actual' : 'Contraseña actual'}<input class="input" type="password" id="pw-a"${pa} autocomplete="current-password"></label>
+      <label class="f">${MODO_CUENTAS ? 'Nuevo PIN' : 'Nueva'}<input class="input" type="password" id="pw-n"${pa} autocomplete="new-password"></label>
+      <label class="f">Repetir<input class="input" type="password" id="pw-r"${pa} autocomplete="new-password"></label>`; })()}</form>
+      <div style="margin-top:14px"><button class="btn" id="pw-save">${MODO_CUENTAS ? 'Cambiar PIN' : 'Cambiar contraseña'}</button></div></section>
+    ${MODO_CUENTAS && !DEMO.on && puede('admin') ? `<section class="card"><h3>Mi cuenta</h3><p class="muted sm">${S.licencia && S.licencia.estado === 'prueba' ? `Prueba gratis: ${S.licencia.diasRestantes === 1 ? 'queda 1 día' : 'quedan ' + S.licencia.diasRestantes + ' días'}.` : 'Licencia activa.'} Ingresas con el WhatsApp ${esc(fmtWA(S.user.usuario))}.</p>
+      <div class="row-btns"><button class="btn" id="sync">${ico('refresh')} Recargar datos</button></div></section>` : ''}
+    ${verSrv ? '' : '<!--'}<section class="card"><h3>${DEMO.on ? 'Modo prueba' : 'Servidor'}</h3><p class="muted sm" style="word-break:break-all">${DEMO.on ? 'Estás usando datos ficticios guardados solo en este navegador. Nada se envía a Google Sheets.' : esc(apiUrl() || 'No configurado')}</p>
+      <div class="row-btns"><button class="btn" id="srv">${DEMO.on ? 'Opciones del modo prueba' : 'Cambiar servidor'}</button><button class="btn" id="sync">${ico('refresh')} Recargar datos</button></div></section>${verSrv ? '' : '-->'}</div></div>`;
   if ($('#cf-save')) $('#cf-save').onclick = async () => {
     try {
       const o = leerCampos(CF, 'cf-');
@@ -2477,9 +2734,9 @@ function vAjustes() {
   };
   $('#pw-save').onclick = async () => {
     try {
-      if ($('#pw-n').value !== $('#pw-r').value) throw new Error('Las contraseñas nuevas no coinciden');
+      if ($('#pw-n').value !== $('#pw-r').value) throw new Error(MODO_CUENTAS ? 'Los PIN nuevos no coinciden' : 'Las contraseñas nuevas no coinciden');
       await api('cambiarClave', { actual: $('#pw-a').value, nueva: $('#pw-n').value });
-      ['#pw-a', '#pw-n', '#pw-r'].forEach(s => { $(s).value = ''; }); toast('Contraseña actualizada', 'ok');
+      ['#pw-a', '#pw-n', '#pw-r'].forEach(s => { $(s).value = ''; }); toast(MODO_CUENTAS ? 'PIN actualizado' : 'Contraseña actualizada', 'ok');
     } catch (e) { err(e); }
   };
   $$('#v-ajustes [data-tema]').forEach(b => b.onclick = async () => {
@@ -3124,11 +3381,32 @@ const confirmar = (m, o) => dialogo(m, o);
    Ejecuta el mismo Code.gs dentro del navegador, simulando
    Google Sheets con localStorage. Nada se envía a internet. */
 function pintarLogin() {
+  if (!$('#f-login')) return;
+  if (MODO_CUENTAS) pintarCuentas();
   $('#l-demo-box').hidden = !DEMO.on;
   $('#l-demo').textContent = DEMO.on ? 'Salir del modo prueba' : 'Probar en modo prueba';
   $('#l-server').hidden = DEMO.on || !!API_URL_DEFAULT;
   $('#l-demo').hidden = !!API_URL_DEFAULT && !DEMO.on;
   $('#l-err').textContent = (!DEMO.on && !apiUrl()) ? 'Configura el servidor o entra en modo prueba.' : '';
+}
+// Pantallas de registro (salón nuevo) e ingreso con WhatsApp + PIN
+function pintarCuentas() {
+  if (!S.lmodo) S.lmodo = LS.get('salon_cuenta', '') ? 'ing' : 'reg';
+  const reg = S.lmodo === 'reg';
+  if (!$('#f-login').dataset.mc) {
+    $('#f-login').dataset.mc = '1';
+    $('#f-login').innerHTML = `<label class="lf">Tu WhatsApp<input class="input" id="l-user" type="tel" inputmode="tel" autocomplete="tel" placeholder="9876-5432" required></label>
+      <label class="lf">PIN<input class="input" id="l-pass" type="password" inputmode="numeric" maxlength="6" autocomplete="current-password" required></label>
+      <button class="btn pri big" type="submit">Ingresar</button><div class="login-err" id="l-err"></div>`;
+    $('.demo-users').hidden = true;
+    $('#l-demo-box').innerHTML = '<b>🧪 Modo prueba</b> · regístrate con datos inventados: todo queda solo en este navegador.';
+  }
+  $('#f-reg').hidden = !reg; $('#f-login').hidden = reg;
+  $('#l-salon').textContent = reg ? 'Bienvenida' : 'Hola de nuevo';
+  $('#l-sub').innerHTML = reg ? `Prueba gratis durante <b>${DIAS_PRUEBA_REG} días</b> el sistema completo: agenda, ventas, gastos y reportes de tu salón.` : 'Ingresa con tu WhatsApp y tu PIN';
+  $('#l-alt').hidden = false; $('#l-pie').hidden = false;
+  $('#l-alt').textContent = reg ? 'Ya tengo cuenta · Ingresar' : `Soy nueva · Probar ${DIAS_PRUEBA_REG} días gratis`;
+  $('#r-err').textContent = '';
 }
 function alternarDemo() {
   DEMO.on = !DEMO.on;
@@ -3203,31 +3481,49 @@ function sha256(bytes) {
 }
 function demoShims() {
   const db = () => DEMO.db;
-  const filas = n => db().sheets[n];
+  let cur = null; // libro en uso (null = principal)
+  const st = () => cur ? db().books[cur] : db();
+  const filas = n => st().sheets[n];
   const ultima = n => { const r = filas(n); let k = r.length; while (k > 0 && (r[k - 1] || []).every(v => v === '' || v === null || v === undefined)) k--; return k; };
-  function Rango(n, r, c, nr, nc) {
+  function Rango(n, r, c, nr, nc, bk) {
+    const filas = x => (bk ? db().books[bk] : db()).sheets[x];
+    this.setValue = v => { const rs = filas(n); while (rs.length < r) rs.push([]); (rs[r - 1] = rs[r - 1] || [])[c - 1] = v; return this; };
     this.getValues = () => { const out = []; for (let i = 0; i < nr; i++) { const row = filas(n)[r - 1 + i] || [], o = []; for (let j = 0; j < nc; j++) { const v = row[c - 1 + j]; o.push(v === undefined || v === null ? '' : v); } out.push(o); } return out; };
     this.setValues = v => { const rs = filas(n); while (rs.length < r - 1 + v.length) rs.push([]); v.forEach((row, i) => { const t = rs[r - 1 + i] || (rs[r - 1 + i] = []); row.forEach((x, j) => { t[c - 1 + j] = x; }); }); return this; };
     this.clearContent = () => { const rs = filas(n); for (let i = 0; i < nr; i++) { const t = rs[r - 1 + i]; if (t) for (let j = 0; j < nc; j++) t[c - 1 + j] = ''; } return this; };
     this.createTextFinder = txt => { const tf = { matchEntireCell: () => tf, findNext: () => { const v = this.getValues(); for (let i = 0; i < v.length; i++) for (let j = 0; j < v[i].length; j++) if (String(v[i][j]) === txt) return { getRow: () => r + i }; return null; } }; return tf; };
     ['setFontWeight', 'setBackground', 'setFontColor', 'setNumberFormat'].forEach(m => { this[m] = () => this; });
   }
-  function Hoja(n) {
+  function Hoja(n, bk) {
+    const filas = x => (bk ? db().books[bk] : db()).sheets[x];
+    const ultima = x => { const r = filas(x); let k = r.length; while (k > 0 && (r[k - 1] || []).every(v => v === '' || v === null || v === undefined)) k--; return k; };
     this.getName = () => n;
+    this.hideSheet = () => this;
     this.getLastRow = () => ultima(n);
     this.getMaxRows = () => Math.max(1000, filas(n).length);
-    this.getRange = (r, c, nr, nc) => new Rango(n, r, c, nr || 1, nc || 1);
+    this.getRange = (r, c, nr, nc) => new Rango(n, r, c, nr || 1, nc || 1, bk);
     this.setFrozenRows = () => {};
     this.appendRow = row => { const rs = filas(n); rs.length = ultima(n); rs.push(row.slice()); return this; };
     this.deleteRow = r => { filas(n).splice(r - 1, 1); };
   }
-  const libro = {
-    getSheetByName: n => db().sheets[n] ? new Hoja(n) : null,
-    insertSheet: n => { db().sheets[n] = []; db().order.push(n); return new Hoja(n); },
-    getSheets: () => db().order.map(n => new Hoja(n)),
-    deleteSheet: h => { const n = h.getName(); delete db().sheets[n]; db().order = db().order.filter(x => x !== n); },
-    setSpreadsheetTimeZone: () => {}
+  const Libro = bk => {
+    const s = () => bk ? db().books[bk] : db();
+    return {
+      getId: () => bk || 'principal',
+      getSheetByName: n => s().sheets[n] ? new Hoja(n, bk) : null,
+      insertSheet: n => { s().sheets[n] = []; s().order.push(n); return new Hoja(n, bk); },
+      getSheets: () => s().order.map(n => new Hoja(n, bk)),
+      deleteSheet: h => { const n = h.getName(); delete s().sheets[n]; s().order = s().order.filter(x => x !== n); },
+      setSpreadsheetTimeZone: () => {}
+    };
   };
+  const SpreadsheetApp = {
+    getActiveSpreadsheet: () => Libro(null),
+    openById: id => { if (!db().books || !db().books[id]) throw new Error('No se encontró la hoja del salón'); return Libro(id); },
+    create: nombre => { const id = 'H' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); (db().books = db().books || {})[id] = { nombre, sheets: {}, order: [] }; return Libro(id); }
+  };
+  const carpeta = { getName: () => 'Salones – Datos' };
+  const DriveApp = { getFoldersByName: () => ({ hasNext: () => true, next: () => carpeta }), createFolder: () => carpeta, getFileById: () => ({ moveTo: () => {} }) };
   const fmtTZ = (d, tz) => {
     const p = {};
     new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
@@ -3252,7 +3548,7 @@ function demoShims() {
   const PropertiesService = { getScriptProperties: () => ({ getProperty: k => ((db().props || {})[k] === undefined ? null : db().props[k]), setProperty: (k, v) => { (db().props = db().props || {})[k] = String(v); } }) };
   const Logger = { log: m => console.log('[demo]', m) };
   const ContentService = { createTextOutput: t => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
-  return [{ getActiveSpreadsheet: () => libro }, Utilities, CacheService, LockService, Logger, ContentService, PropertiesService];
+  return [SpreadsheetApp, Utilities, CacheService, LockService, Logger, ContentService, PropertiesService, DriveApp];
 }
 function demoBackend() {
   if (DEMO.route) return DEMO.route;
@@ -3260,10 +3556,10 @@ function demoBackend() {
   try { DEMO.cache = JSON.parse(LS.get('salon_demo_cache', '{}')) || {}; } catch (e) { DEMO.cache = {}; }
   const nuevo = !DEMO.db || !DEMO.db.sheets;
   if (nuevo) DEMO.db = { sheets: {}, order: [] };
-  const exp = ['route_', 'instalar', 'rows_', 'upsert_', 'hash_', 'ahora_', 'hoy_', 'guardarCita_', 'aplicarEstado_', 'venta_', 'appendRows_', 'newId_'];
-  const B = new Function('SpreadsheetApp', 'Utilities', 'CacheService', 'LockService', 'Logger', 'ContentService', 'PropertiesService',
+  const exp = ['MULTI_SALON', 'route_', 'instalar', 'rows_', 'upsert_', 'hash_', 'ahora_', 'hoy_', 'guardarCita_', 'aplicarEstado_', 'venta_', 'appendRows_', 'newId_'];
+  const B = new Function('SpreadsheetApp', 'Utilities', 'CacheService', 'LockService', 'Logger', 'ContentService', 'PropertiesService', 'DriveApp',
     $('#backend-src').textContent + '\nreturn {' + exp.map(n => n + ':' + n).join(',') + '};')(...demoShims());
-  if (nuevo) { B.instalar(); sembrarDemo(B); demoGuardar(); }
+  if (nuevo) { B.instalar(); if (!B.MULTI_SALON) sembrarDemo(B); demoGuardar(); }
   DEMO.route = B.route_;
   return DEMO.route;
 }
@@ -3343,12 +3639,54 @@ function sembrarDemo(B) {
 
 const VISTAS = { inicio: vInicio, agenda: vAgenda, ventas: vVentas, gastos: vGastos, clientes: vClientes, servicios: vServicios, tratamientos: vTratamientos, productos: vProductos, reportes: vReportes, usuarios: vUsuarios, ajustes: vAjustes };
 
+/* ===================== APP ANDROID (APK) =====================
+   Dentro del APK no existe el menú de compartir del navegador: se usa el puente SalonApp */
+function puenteApp() {
+  const A = window.SalonApp;
+  if (!A) return;
+  document.documentElement.classList.add('en-app');
+  const b64 = blob => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1] || ''); r.onerror = () => no(new Error('No se pudo leer el archivo')); r.readAsDataURL(blob); });
+  navigator.canShare = () => true;
+  navigator.share = async d => {
+    const f = d && d.files && d.files[0];
+    if (!f) throw new Error('Nada para compartir');
+    const r = A.compartir(await b64(f), f.name || 'imagen.png', f.type || 'image/png', (d && d.text) || '');
+    if (r !== 'ok') throw new Error(r);
+  };
+  document.addEventListener('click', e => {
+    const a = e.target && e.target.closest ? e.target.closest('a[download]') : null;
+    if (!a) return;
+    e.preventDefault(); e.stopPropagation();
+    const nombre = a.getAttribute('download') || 'archivo';
+    fetch(a.href).then(r => r.blob()).then(async blob => {
+      const tipo = (blob.type || 'application/octet-stream').split(';')[0];
+      const r = A.guardar(await b64(blob), nombre, tipo);
+      if (r === 'galeria') toast('Imagen guardada en la galería', 'ok');
+      else if (r === 'descargas') toast('Guardado en Descargas › Salon VM', 'ok');
+      else if (r !== 'compartido') toast('No se pudo guardar: ' + r, 'error');
+    }).catch(x => toast('No se pudo guardar el archivo', 'error'));
+  }, true);
+  window.print = () => A.imprimir();
+}
+// Botón «atrás» del teléfono: cierra lo abierto antes de salir de la app
+function atrasApp() {
+  if (!$('#dlg').hidden) { $('#dlg-no').click(); return 'ok'; }
+  if (!$('#modal').hidden) { cerrarModal(); return 'ok'; }
+  if ($('#nav') && $('#nav').classList.contains('open')) { menu(false); return 'ok'; }
+  if (!$('#app').hidden && S.vista && S.vista !== 'inicio') { ir('inicio'); return 'ok'; }
+  return 'salir';
+}
+
 /* ===================== ARRANQUE ===================== */
 document.addEventListener('DOMContentLoaded', () => {
+  puenteApp();
   aplicarTema(LS.get('salon_tema', 'vino'));
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch (e) {}
   $('#l-salon').textContent = LS.get('salon_nombre', '') || 'Salón de Belleza';
+  if (MODO_CUENTAS) pintarCuentas();
   $('#f-login').onsubmit = ingresar;
+  $('#f-reg').onsubmit = registrarse;
+  $('#l-alt').onclick = () => { S.lmodo = S.lmodo === 'reg' ? 'ing' : 'reg'; pintarLogin(); };
   $('#l-server').onclick = configServidor;
   $('#l-demo').onclick = alternarDemo;
   $('#demo-tag').onclick = menuDemo;
